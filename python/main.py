@@ -3,14 +3,23 @@
 import sys
 import traceback
 
-from pcolors import printRed, printBlue, printGreen
-from buffer import BufferToSmall, Buffer
+from dofussniff.pcolors import printRed, printBlue, printGreen
+from dofussniff.buffer import BufferToSmall, Buffer
+from dofussniff.monster import Monsters, Monster
+from dofussniff.i18nfileaccessor import I18nFileAccessor
 
 ####################################################
 #
 #  Exceptions
 #
 ####################################################
+
+class MessageToShort(Exception):
+	def __init__(self, value=None):
+		self.parameter = value
+
+	def __str__(self):
+		return repr(self.parameter)
 
 class StopException(Exception):
 	def __init__(self, value=None):
@@ -40,7 +49,7 @@ class UnknowActorType(Exception):
 	def __str__(self):
 		return repr(self.parameter)
 
-class UnknowDipositionType(Exception):
+class UnknowDispositionType(Exception):
 	def __init__(self, value):
 		self.parameter = value
 
@@ -68,61 +77,117 @@ class UnknowTeamMemberType(Exception):
 	def __str__(self):
 		return repr(self.parameter)
 
+class UnknowEffectType(Exception):
+	def __init__(self, value):
+		self.parameter = value
+
+	def __str__(self):
+		return repr(self.parameter)
+
 ####################################################
 #
 #  Deserialization
 #
 ####################################################
 
-def decode(string):
-	b =  Buffer(string)
+class DofusSniff(object):
+	def __init__(self):
+		self.b = Buffer()
+		self.monsters = Monsters("/home/heero/src/jeux/dofus/Dofus/share/data/common/Monsters.d2o")
+		self.i18n_fr = I18nFileAccessor("/home/heero/src/jeux/dofus/Dofus/share/data/i18n/i18n_fr.d2i")
 
-	while(b._size > b._cursor):
-		try:
-			deserialize(b)
-		except UnknowMessage as exp:
-			printRed("Unknow packet type: {}\n".format(exp))
-			printRed("info restantes: {}\n".format(b._size - b._cursor))
-			break
-		except StopException:
-			break
-		except:
-			print "Exception in user code:"
-			print '-'*60
-			traceback.print_exc(file=sys.stdout)
-			print '-'*60
-			break
+	def decode(self, string):
+		self.b.addInfos(string)
 
-def deserialize(b):
-	var1 = b.readUnsignedShort()
-	msgId = var1>>2
-	sizeLen = var1 & 0x03
+		while(self.b.getSize() > self.b.getCursor()):
+			try:
+				self.deserialize()
+			except MessageToShort:
+
+				# Don't wait too long
+				if(self.b.discardReadAndSaveUnread() >= 3):
+					self.b.reset()
+				break
+			except UnknowMessage as exp:
+				printRed("Unknow packet type: {}\n".format(exp))
+				printRed("info restantes: {}\n".format(
+					self.b.getSize() - self.b.getCursor()
+				))
+
+				self.b.reset()
+				break
+			except StopException:
+
+				self.b.reset()
+				break
+			except:
+				print "Exception in user code:"
+				print '-'*60
+				traceback.print_exc(file=sys.stdout)
+				print '-'*60
+
+				self.b.reset()
+				break
+
+	def deserialize(self):
+		var1 = self.b.readUnsignedShort()
+		msgId = var1>>2
+		sizeLen = var1 & 0x03
 	
-	msgSize = 0
-	if(sizeLen == 0):
 		msgSize = 0
-	elif(sizeLen == 1):
-		msgSize = b.readUnsignedByte()
-	elif(sizeLen == 2):
-		msgSize = b.readUnsignedShort()
-	else:
-		printRed("wrong size {}\n".format(sizeLen))
-		raise StopException()
+		if(sizeLen == 0):
+			msgSize = 0
+		elif(sizeLen == 1):
+			msgSize = self.b.readUnsignedByte()
+		elif(sizeLen == 2):
+			msgSize = self.b.readUnsignedShort()
+		else:
+			printRed("wrong size {}\n".format(sizeLen))
+			raise StopException()
 
-	if(msgSize > b.getSize()):
-		printRed("message too short\n")
-		raise StopException()
+		if(msgSize > self.b.getSize()):
+			#printGreen("size: {}, cursor: {}\n".format(b.getSize(), b.getCursor()))
+			if(sizeLen == 1):
+				self.b.moveCursor(-3)
+			elif(sizeLen == 2):
+				self.b.moveCursor(-4)
 
-	if(msgId == MapComplementaryInformationsDataMessage.getProtocolId()):
-		printBlue("[new map]\n")
+			#printGreen("size: {}, cursor: {}\n".format(b.getSize(), b.getCursor()))
+			printRed("message too short (id: {}) {} > {}\n".format(
+				msgId, msgSize, self.b.getSize()
+			))
+			raise MessageToShort()
 
-		infos = MapComplementaryInformationsDataMessage().deserialize(b)
-	elif(msgId == BasicNoOperationMessage.getProtocolId()):
-		noOM = BasicNoOperationMessage().deserialize(b)
-	elif(msgId == BasicLatencyStatsRequestMessage.getProtocolId()):
-		noOM = BasicLatencyStatsRequestMessage().deserialize(b)
-	else:	
-		raise UnknowMessage(msgId)
+		if(msgId == MapComplementaryInformationsDataMessage.getProtocolId()):
+			printBlue("[new map]\n")
+
+			self.infos = MapComplementaryInformationsDataMessage()
+			self.infos.deserialize(self.b)
+		elif(msgId == BasicNoOperationMessage.getProtocolId()):
+			self.basicBNOM = BasicNoOperationMessage()
+			self.basicBNOM.deserialize(self.b)
+		elif(msgId == BasicLatencyStatsRequestMessage.getProtocolId()):
+			self.basicLSRM = BasicLatencyStatsRequestMessage()
+			self.basicLSRM.deserialize(self.b)
+		elif(msgId == NotificationListMessage.getProtocolId()):
+			self.notiLM = NotificationListMessage()
+			self.notiLM.deserialize(self.b)
+		elif(msgId == CharacterSelectedSuccessMessage.getProtocolId()):
+			self.characterSSM = CharacterSelectedSuccessMessage()
+			self.characterSSM.deserialize(self.b)
+		elif(msgId == InventoryContentAndPresetMessage.getProtocolId()):
+			self.inventoryCAPM = InventoryContentAndPresetMessage()
+			self.inventoryCAPM.deserialize(self.b)
+
+			objs = self.inventoryCAPM.objects
+			for obj in objs:
+				if(obj.objectGID == 10418):
+					for effect in obj.effects:
+						monster = self.monsters.getObj(effect.diceConst)
+						if(monster._race == 78):
+							printBlue("{}\n".format(self.i18n_fr.getText(monster._nameId)))
+		else:
+			raise UnknowMessage(msgId)
 
 class MapComplementaryInformationsDataMessage(object):
 	@staticmethod
@@ -143,12 +208,13 @@ class MapComplementaryInformationsDataMessage(object):
 			house = 0
 
 			if(houseType == HouseInformations.getProtocolId()):
-				house = HouseInformations().deserialize(b)
+				house = HouseInformations()
 			elif(houseType == HouseInformationsExtended.getProtocolId()):
-				house = HouseInformationsExtended().deserialize(b)
+				house = HouseInformationsExtended()
 			else:
 				raise UnknowHouseType(houseType)
 
+			house.deserialize(b)
 			self.houses.append(house)
 
 		# Actors
@@ -160,24 +226,25 @@ class MapComplementaryInformationsDataMessage(object):
 			actor = 0
 
 			if(actorType == GameRolePlayCharacterInformations.getProtocolId()):
-				actor = GameRolePlayCharacterInformations().deserialize(b)
+				actor = GameRolePlayCharacterInformations()
 			elif(actorType == GameRolePlayGroupMonsterInformations.getProtocolId()):
-				actor = GameRolePlayGroupMonsterInformations().deserialize(b)
+				actor = GameRolePlayGroupMonsterInformations()
 			elif(actorType == GameRolePlayTaxColectorInformations.getProtocolId()):
-				actor = GameRolePlayTaxColectorInformations().deserialize(b)
+				actor = GameRolePlayTaxColectorInformations()
 			elif(actorType == GameRolePlayPrismInformations.getProtocolId()):
-				actor = GameRolePlayPrismInformations().deserialize(b)
+				actor = GameRolePlayPrismInformations()
 			elif(actorType == GameRolePlayNpcInformations.getProtocolId()):
-				actor = GameRolePlayNpcInformations().deserialize(b)
+				actor = GameRolePlayNpcInformations()
 			elif(actorType == GameRolePlayMerchantWithGuildInformations.getProtocolId()):
-				actor = GameRolePlayMerchantWithGuildInformations().deserialize(b)
+				actor = GameRolePlayMerchantWithGuildInformations()
 			elif(actorType == GameRolePlayMerchantInformations.getProtocolId()):
-				actor = GameRolePlayMerchantInformations().deserialize(b)
+				actor = GameRolePlayMerchantInformations()
 			elif(actorType == GameRolePlayMountInformations.getProtocolId()):
-				actor = GameRolePlayMountInformations().deserialize(b)
+				actor = GameRolePlayMountInformations()
 			else:
 				raise UnknowActorType(actorType)
 
+			actor.deserialize(b)
 			self.actors.append(actor)
 
 		# Interactive elements
@@ -185,7 +252,8 @@ class MapComplementaryInformationsDataMessage(object):
 
 		nbInteractiveElement = b.readUnsignedShort()
 		for i in range(0, nbInteractiveElement):
-			interactiveElement = InteractiveElement().deserialize(b)
+			interactiveElement = InteractiveElement()
+			interactiveElement.deserialize(b)
 			self.interactiveElements.append(interactiveElement)
 
 		# Stated elements
@@ -193,7 +261,8 @@ class MapComplementaryInformationsDataMessage(object):
 
 		nbStatedElement = b.readUnsignedShort()
 		for i in range(0, nbStatedElement):
-			statedElement = StatedElement().deserialize(b)
+			statedElement = StatedElement()
+			statedElement.deserialize(b)
 			self.statedElements.append(statedElement)
 
 		# Map obstacles
@@ -201,7 +270,8 @@ class MapComplementaryInformationsDataMessage(object):
 
 		nbMapObstacle = b.readUnsignedShort()
 		for i in range(0, nbMapObstacle):
-			mapObstacle = MapObstacle().deserialize(b)
+			mapObstacle = MapObstacle()
+			mapObstacle.deserialize(b)
 			self.mapObstacles.append(mapObstacle)
 
 		# Fights
@@ -209,7 +279,8 @@ class MapComplementaryInformationsDataMessage(object):
 
 		nbFight = b.readUnsignedShort()
 		for i in range(0, nbFight):
-			fight = FightCommonInformations().deserialize(b)
+			fight = FightCommonInformations()
+			fight.deserialize(b)
 			self.fights.append(fight)
 
 
@@ -241,7 +312,8 @@ class HouseInformationsExtended(HouseInformations):
 	def deserialize(self, b):
 		HouseInformations.deserialize(self, b)
 
-		self.guildInfo = GuildInformations().deserialize(b)
+		self.guildInfo = GuildInformations()
+		self.guildInfo.deserialize(b)
 
 class GuildInformations(object):
 	@staticmethod
@@ -251,7 +323,8 @@ class GuildInformations(object):
 	def deserialize(self, b):
 		self.guildId = b.readInt()
 		self.guildName = b.readUTF()
-		self.guildEmblem = GuildEmblem().deserialize(b)
+		self.guildEmblem = GuildEmblem()
+		self.guildEmblem.deserialize(b)
 
 class GuildEmblem(object):
 	@staticmethod
@@ -271,13 +344,16 @@ class GameContextActorInformations(object):
 
 	def deserialize(self, b):
 		self.contextualId = b.readInt()
-		self.look = EntityLook().deserialize(b)
+		self.look = EntityLook()
+		self.look.deserialize(b)
 
 		dispositionType = b.readUnsignedShort()
 		if(dispositionType == EntityDispositionInformations.getProtocolId()):
-			self.disposition = EntityDispositionInformations().deserialize(b)
+			self.disposition = EntityDispositionInformations()
 		else:
 			raise UnknowDispositionType(dispositionType)
+
+		self.disposition.deserialize(b)
 
 class GameRolePlayActorInformations(GameContextActorInformations):
 	@staticmethod
@@ -307,11 +383,13 @@ class GameRolePlayHumanoidInformations(GameRolePlayNamedActorInformations):
 
 		humanType = b.readUnsignedShort()
 		if(humanType == HumanInformations.getProtocolId()):
-			self.humanoidInfo = HumanInformations().deserialize(b)
+			self.humanoidInfo = HumanInformations()
 		elif(humanType == HumanWithGuildInformations.getProtocolId()):
-			self.humanoidInfo = HumanWithGuildInformations().deserialize(b)
+			self.humanoidInfo = HumanWithGuildInformations()
 		else:
 			raise UnknowHumanType(humanType)
+
+		self.humanoidInfo.deserialize(b)
 
 class GameRolePlayCharacterInformations(GameRolePlayHumanoidInformations):
 	@staticmethod
@@ -321,7 +399,8 @@ class GameRolePlayCharacterInformations(GameRolePlayHumanoidInformations):
 	def deserialize(self, b):
 		GameRolePlayHumanoidInformations.deserialize(self, b)
 
-		self.alignmentInfo = ActorAlignmentInformations().deserialize(b)
+		self.alignmentInfo = ActorAlignmentInformations()
+		self.alignmentInfo.deserialize(b)
 
 class EntityLook(object):
 	@staticmethod
@@ -352,7 +431,8 @@ class EntityLook(object):
 		self.subentities = list()
 		nbSubenrity = b.readUnsignedShort()
 		for i in range(0, nbSubenrity):
-			subentity = SubEntity().deserialize(b)
+			subentity = SubEntity()
+			subentity.deserialize(b)
 			self.subentities.append(subentity)
 
 class SubEntity(object):
@@ -363,7 +443,8 @@ class SubEntity(object):
 	def deserialize(self, b):
 		self.bindingPointCategory = b.readByte()
 		self.bindingPointIndex = b.readByte()
-		self.subentityLook = EntityLook().deserialize(b)
+		self.subentityLook = EntityLook()
+		self.subentityLook.deserialize(b)
 
 class EntityDispositionInformations(object):
 	@staticmethod
@@ -383,13 +464,15 @@ class HumanInformations(object):
 		self.followingCharactersLook = list()
 		nbFollowingCharacter = b.readUnsignedShort()
 		for i in range(0, nbFollowingCharacter):
-			look = EntityLook().deserialize(b)
+			look = EntityLook()
+			look.deserialize(b)
 			self.followingCharactersLook.append(look)
 
 		self.emoteId = b.readByte()
 		self.emoteEndTime = b.readUnsignedShort()
 
-		self.restrictions = ActorRestrictionsInformations().deserialize(b)
+		self.restrictions = ActorRestrictionsInformations()
+		self.restrictions.deserialize(b)
 
 		self.titleId = b.readShort()
 		self.titleParam = b.readUTF()
@@ -401,7 +484,8 @@ class HumanWithGuildInformations(HumanInformations):
 
 	def deserialize(self, b):
 		HumanInformations.deserialize(self, b)
-		self.guildInfo = GuildInformations().deserialize(b)
+		self.guildInfo = GuildInformations()
+		self.guildInfo.deserialize(b)
 
 class ActorRestrictionsInformations(object):
 	@staticmethod
@@ -462,7 +546,8 @@ class GameRolePlayGroupMonsterInformations(GameRolePlayActorInformations):
 		self.underlings = list()
 		nbUnderlings = b.readUnsignedShort()
 		for i in range(0, nbUnderlings):
-			underling = MonsterInGroupInformations().deserialize(b)
+			underling = MonsterInGroupInformations()
+			underling.deserialize(b)
 			self.underlings.append(underling)
 
 		self.ageBonus = b.readShort()
@@ -477,7 +562,8 @@ class MonsterInGroupInformations(object):
 		self.creatureGenericId = b.readInt()
 		self.grade = b.readByte()
 
-		self.look = EntityLook().deserialize(b)
+		self.look = EntityLook()
+		self.look.deserialize(b)
 
 class GameRolePlayTaxColectorInformations(GameRolePlayActorInformations):
 	@staticmethod
@@ -489,7 +575,8 @@ class GameRolePlayTaxColectorInformations(GameRolePlayActorInformations):
 
 		self.firstNameId = b.readShort()
 		self.lastNameId = b.readShort()
-		self.guildIdentity = GuildInformations().deserialize(b)
+		self.guildIdentity = GuildInformations()
+		self.guildIdentity.deserialize(b)
 		self.guildLevel = b.readUnsignedByte()
 		self.taxCollectorAttack = b.readInt()
 
@@ -501,7 +588,8 @@ class GameRolePlayPrismInformations(GameRolePlayActorInformations):
 	def deserialize(self, b):
 		GameRolePlayActorInformations.deserialize(self, b)
 
-		self.alignInfos = ActorAlignmentInformations().deserialize(b)
+		self.alignInfos = ActorAlignmentInformations()
+		self.alignInfoso.deserialize(b)
 
 class GameRolePlayNpcInformations(GameRolePlayActorInformations):
 	@staticmethod
@@ -534,7 +622,8 @@ class GameRolePlayMerchantWithGuildInformations(GameRolePlayMerchantInformations
 	def deserialize(self, b):
 		GameRolePlayMerchantInformations.deserialize(self, b)
 
-		self.guildInfos = GuildInformations().deserialize(b)
+		self.guildInfos = GuildInformations()
+		self.guildInfos.deserialize(b)
 
 class GameRolePlayMountInformations(GameRolePlayNamedActorInformations):
 	@staticmethod
@@ -563,10 +652,11 @@ class InteractiveElement(object):
 
 			enabledSkill = 0
 			if(enabledSkillType == InteractiveElementSkill.getProtocolId()):
-				enabledSkill = InteractiveElementSkill().deserialize(b)
+				enabledSkill = InteractiveElementSkill()
 			else:
 				raise UnknowSkillType(enabledSkillType)
 
+			enabledSkill.deserialize(b)
 			self.enabledSkills.append(enabledSkill)
 
 		self.disabledSkills = list()
@@ -576,10 +666,11 @@ class InteractiveElement(object):
 
 			disabledSkill = 0
 			if(disabledSkillType == InteractiveElementSkill.getProtocolId()):
-				disabledSkill = InteractiveElementSkill().deserialize(b)
+				disabledSkill = InteractiveElementSkill()
 			else:
 				raise UnknowSkillType(disabledSkillType)
 
+			disabledSkill.deserialize(b)
 			self.disabledSkills.append(disabledSkill)
 			
 
@@ -637,10 +728,11 @@ class FightCommonInformations(object):
 
 			fightTeam = 0
 			if(fightTeamType == FightTeamInformations.getProtocolId()):
-				fightTeam = FightTeamInformations().deserialize(b)
+				fightTeam = FightTeamInformations()
 			else:
 				raise UnknowFightTeamType(fightTeamType)
 
+			fightTeam.deserialize(b)
 			self.fightTeams.append(fightTeam)
 
 		self.fightTeamPositions = list()
@@ -651,7 +743,8 @@ class FightCommonInformations(object):
 		self.fightTeamOptions = list()
 		nbFightTeamOption = b.readUnsignedShort()
 		for i in range(0, nbFightTeamOption):
-			fightTeamOption = FightOptionsInformations().deserialize(b)
+			fightTeamOption = FightOptionsInformations()
+			fightTeamOption.deserialize(b)
 			self.fightTeamOptions.append(fightTeamOption)
 
 class AbstractFightTeamInformations(object):
@@ -680,12 +773,13 @@ class FightTeamInformations(AbstractFightTeamInformations):
 
 			teamMember = 0
 			if(teamMemberType == FightTeamMemberCharacterInformations.getProtocolId()):
-				teamMember = FightTeamMemberCharacterInformations().deserialize(b)
+				teamMember = FightTeamMemberCharacterInformations()
 			elif(teamMemberType == FightTeamMemberMonsterInformations.getProtocolId()):
-				teamMember = FightTeamMemberMonsterInformations().deserialize(b)
+				teamMember = FightTeamMemberMonsterInformations()
 			else:
 				raise UnknowTeamMemberType(teamMemberType)
 
+			teamMember.deserialize(b)
 			self.teamMembers.append(teamMember)
 		
 class FightTeamMemberInformations(object):
@@ -745,3 +839,289 @@ class BasicLatencyStatsRequestMessage(object):
 
 	def deserialize(self, b):
 		pass
+
+class NotificationListMessage(object):
+	@staticmethod
+	def getProtocolId():
+		return 6087
+
+	def deserialize(self, b):
+		self.flags = list()
+
+		nbFlag = b.readUnsignedShort()
+		for i in range(0, nbFlag):
+			self.flags.append(b.readInt())
+
+class CharacterSelectedSuccessMessage(object):
+	@staticmethod
+	def getProtocolId():
+		return 153
+
+	def deserialize(self, b):
+		self.infos = CharacterBaseInformations()
+		self.infos.deserialize(b)
+
+class CharacterMinimalInformations(object):
+	@staticmethod
+	def getProtocolId():
+		return 110
+
+	def deserialize(self, b):
+		self.id = b.readInt()
+		self.level = b.readUnsignedByte()
+		self.name = b.readUTF()
+
+class CharacterMinimalPlusLookInformations(CharacterMinimalInformations):
+	@staticmethod
+	def getProtocolId():
+		return 163
+
+	def deserialize(self, b):
+		self.infos = CharacterMinimalInformations.deserialize(self, b)
+		self.look = EntityLook()
+		self.look.deserialize(b)
+
+class CharacterBaseInformations(CharacterMinimalPlusLookInformations):
+	@staticmethod
+	def getProtocolId():
+		return 45
+
+	def deserialize(self, b):
+		CharacterMinimalPlusLookInformations.deserialize(self, b)
+
+		self.breed = b.readByte()
+		self.sex = b.readBoolean()
+
+class InventoryContentMessage(object):
+	@staticmethod
+	def getProtocolId():
+		return 3016
+
+	def deserialize(self, b):
+		self.objects = list()
+		nbObject = b.readUnsignedShort()
+		printBlue("nbObject: {}\n".format(nbObject))
+		for i in range(0, nbObject):
+			objectItem = ObjectItem()
+			objectItem.deserialize(b)
+			self.objects.append(objectItem)
+
+		self.kamas = b.readInt()
+		printGreen("kama: {}\n".format(self.kamas))
+
+class InventoryContentAndPresetMessage(InventoryContentMessage):
+	@staticmethod
+	def getProtocolId():
+		return 6162
+
+	def deserialize(self, b):
+		InventoryContentMessage.deserialize(self, b)
+
+		self.presets = list()
+		nbPreset = b.readUnsignedShort()
+		for i in range(0, nbPreset):
+			preset = Preset()
+			preset.deserialize(b)
+			self.presets.append(preset)
+
+class Preset(object):
+	@staticmethod
+	def getProtocolId():
+		return 355
+
+	def deserialize(self, b):
+		self.presetId = b.readByte()
+		self.symbolId = b.readByte()
+		self.mount = b.readBoolean()
+
+		self.objects = list()
+		nbObject = b.readUnsignedShort()
+		for i in range(0, nbObject):
+			presetItem = PresetItem()
+			presetItem.deserialize(b)
+			self.objects.append(presetItem)
+
+class PresetItem(object):
+	@staticmethod
+	def getProtocolId():
+		return 354
+
+	def deserialize(self, b):
+		self.position = b.readUnsignedByte()
+		self.objGid = b.readInt()
+		self.objUid = b.readInt()
+
+class Item(object):
+	@staticmethod
+	def getProtocolId():
+		return 7
+
+	def deserialize(self, b):
+		pass
+
+class ObjectItem(Item):
+	@staticmethod
+	def getProtocolId():
+		return 37
+
+	def deserialize(self, b):
+		Item.deserialize(self, b)
+
+		self.position = b.readUnsignedByte()
+		self.objectGID = b.readShort()
+		self.powerRate = b.readShort()
+		self.overMax = b.readBoolean()
+
+		self.effects = list()
+		nbEffect = b.readUnsignedShort()
+		printGreen("nbEffect: {}, position: {}, GID: {}, Rate {}, overMax: {}, ".format(nbEffect, self.position, self.objectGID, self.powerRate, self.overMax))
+		for i in range(0, nbEffect):
+			effectType = b.readUnsignedShort()
+
+			effect = 0
+			if(effectType == ObjectEffect.getProtocolId()):
+				printRed(", Effect")
+				effect = ObjectEffect()
+			elif(effectType == ObjectEffectInteger.getProtocolId()):
+				printRed(", EffectInt")
+				effect = ObjectEffectInteger()
+			elif(effectType == ObjectEffectCreature.getProtocolId()):
+				printRed(", EffectCrea")
+				effect = ObjectEffectCreature()
+			elif(effectType == ObjectEffectDate.getProtocolId()):
+				printRed(", EffectDate")
+				effect = ObjectEffectDate()
+			elif(effectType == ObjectEffectDice.getProtocolId()):
+				printRed(", EffectDice")
+				effect = ObjectEffectDice()
+			elif(effectType == ObjectEffectDuration.getProtocolId()):
+				printRed(", EffectDuration")
+				effect = ObjectEffectDuration()
+			elif(effectType == ObjectEffectString.getProtocolId()):
+				printRed(", EffectStr")
+				effect = ObjectEffectString()
+			elif(effectType == ObjectEffectLadder.getProtocolId()):
+				printRed(", EffectLadder")
+				effect = ObjectEffectLadder()
+			elif(effectType == ObjectEffectMinMax.getProtocolId()):
+				printRed(", EffectMinMax")
+				effect = ObjectEffectMinMax()
+			else:
+				raise UnknowEffectType(effectType)
+
+			effect.deserialize(b)
+			self.effects.append(effect)
+
+		self.objectUID = b.readInt()
+		self.quantity = b.readInt()
+		printGreen("UID: {}, quantity: {}\n".format(self.objectUID, self.quantity))
+
+class ObjectEffect(object):
+	@staticmethod
+	def getProtocolId():
+		return 76
+
+	def deserialize(self, b):
+		self.actionId = b.readShort()
+
+class ObjectEffectInteger(ObjectEffect):
+	@staticmethod
+	def getProtocolId():
+		return 70
+
+	def deserialize(self, b):
+		ObjectEffect.deserialize(self, b)
+
+		self.value = b.readShort()
+
+class ObjectEffectCreature(ObjectEffect):
+	@staticmethod
+	def getProtocolId():
+		return 71
+
+	def deserialize(self, b):
+		ObjectEffect.deserialize(self, b)
+
+		self.monsterFamilyId = b.readShort()
+
+class ObjectEffectDate(ObjectEffect):
+	@staticmethod
+	def getProtocolId():
+		return 72
+
+	def deserialize(self, b):
+		ObjectEffect.deserialize(self, b)
+
+		self.year = b.readShort()
+		self.month = b.readShort()
+		self.day = b.readShort()
+		self.hour = b.readShort()
+		self.minute = b.readShort()
+
+class ObjectEffectDice(ObjectEffect):
+	@staticmethod
+	def getProtocolId():
+		return 73
+
+	def deserialize(self, b):
+		ObjectEffect.deserialize(self, b)
+
+		self.diceNum = b.readShort()
+		self.diceSide = b.readShort()
+		self.diceConst = b.readShort()
+
+class ObjectEffectString(ObjectEffect):
+	@staticmethod
+	def getProtocolId():
+		return 74
+
+	def deserialize(self, b):
+		ObjectEffect.deserialize(self, b)
+
+		self.value = b.readUTF()
+		printBlue(", string: {}".format(self.value))
+
+class ObjectEffectDuration(ObjectEffect):
+	@staticmethod
+	def getProtocolId():
+		return 75
+
+	def deserialize(self, b):
+		ObjectEffect.deserialize(self, b)
+
+		self.day = b.readShort()
+		self.hour = b.readShort()
+		self.minute = b.readShort()
+
+class ObjectEffectLadder(ObjectEffect):
+	@staticmethod
+	def getProtocolId():
+		return 81
+
+	def deserialize(self, b):
+		ObjectEffect.deserialize(self, b)
+
+		self.monsterCount = b.readInt()
+
+class ObjectEffectMinMax(ObjectEffect):
+	@staticmethod
+	def getProtocolId():
+		return 82
+
+	def deserialize(self, b):
+		ObjectEffect.deserialize(self, b)
+
+		self.min = b.readShort()
+		self.max = b.readShort()
+
+class ObjectEffectMount(ObjectEffect):
+	@staticmethod
+	def getProtocolId():
+		return 179
+
+	def deserialize(self, b):
+		ObjectEffect.deserialize(self, b)
+
+		self.mountId = b.readInt()
+		self.date = b.readDouble()
+		self.modelId = b.readShort()

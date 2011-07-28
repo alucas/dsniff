@@ -7,7 +7,7 @@ set(${PROJECT_NAME}_PATCH_LEVEL 0)
 
 set(CMAKE_INSTALL_PREFIX /home/heero)
 
-set(CMAKE_C_FLAGS "-std=c99 -Wall -Wextra -ansi")
+set(CMAKE_C_FLAGS "-std=c99 -Wall -Wextra -Werror -ansi")
 
 # find python libs/headers
 find_package(PythonLibs REQUIRED)
@@ -18,4 +18,6 @@ add_library(dofussniff SHARED dofus.c)
 target_link_libraries(dofussniff ${PYTHON_LIBRARIES})
 
 install(TARGETS dofussniff DESTINATION lib)
-install(FILES python/pcolors.py python/buffer.py python/main.py DESTINATION lib/python)
+install(FILES python/pcolors.py python/buffer.py python/main.py
+		python/monster.py python/i18nfileaccessor.py python/__init__.py
+		DESTINATION lib/python/dofussniff)

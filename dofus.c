@@ -10,7 +10,6 @@
 #include <dlfcn.h>
 
 #define SOCKET 8
-#define SCRIPT_DIR "/home/heero/src/jeux/dofus/bot6/python"
 
 typedef ssize_t (* send_t)(int sockfd, const void *buf, size_t len, int flags);
 typedef ssize_t (* recv_t)(int sockfd,       void *buf, size_t len, int flags);
@@ -20,6 +19,8 @@ typedef int (* connect_t)(int sockfd, const struct sockaddr *addr,
 static send_t newsend = NULL;
 static recv_t newrecv = NULL;
 static connect_t newconnect = NULL;
+
+static PyObject* pinst = NULL;
 
 static int initVars(void){
 	char *msg;
@@ -55,9 +56,35 @@ static int initVars(void){
 
 	Py_Initialize();
 
-	FILE *script_file = fopen(SCRIPT_DIR"/main.py", "r");
-	PyRun_SimpleFile(script_file, "main.py");
-	fclose(script_file);
+	printf("[init python modules]\n");
+
+	/* run objects with low-level calls */
+	PyObject *pmod, *pclass;
+
+	/* instance = module.klass( ) */
+	pmod = PyImport_ImportModule("dofussniff.main");
+	if(pmod != NULL){
+		pclass = PyObject_GetAttrString(pmod, "DofusSniff");
+		if(pclass != NULL){
+			pinst  = PyEval_CallObject(pclass, NULL);
+			if(pinst == NULL){
+				PyErr_Print();
+				return -1;
+			}
+
+			Py_DECREF(pclass);
+		}else{
+			PyErr_Print();
+			return -1;
+		}
+
+		Py_DECREF(pmod);
+	}else{
+		PyErr_Print();
+		return -1;
+	}
+
+	printf("[init: All good!]\n");
 
 	return 0;
 }
@@ -84,14 +111,31 @@ extern ssize_t recv(int sockfd, void *buf, size_t len, int flags){
 	ssize_t msglen;
 	msglen = newrecv(sockfd, buf, len, flags);
 	
-	if(sockfd == SOCKET){
-		PyObject* main_module = PyImport_AddModule("__main__");
-		PyObject* global_dict = PyModule_GetDict(main_module);
-		PyObject* expression  = PyDict_GetItemString(global_dict, "decode");
-		PyObject* ret = PyObject_CallFunction(expression, "s#", buf, msglen);
-		if(ret == NULL){
+	if(sockfd == SOCKET && pinst != NULL){
+		PyObject *pmeth, *pargs, *pres;
+
+		pmeth  = PyObject_GetAttrString(pinst, "decode");
+		if(pmeth != NULL){
+			pargs  = Py_BuildValue("(s#)", buf, msglen);
+			if(pargs != NULL){
+				pres = PyEval_CallObject(pmeth, pargs);
+				if(pres != NULL){
+					Py_DECREF(pres);
+				}else{
+					PyErr_Print();
+				}
+
+				Py_DECREF(pmeth);
+			}else{
+				PyErr_Print();
+			}
+
+			Py_DECREF(pargs);
+		}else{
 			PyErr_Print();
 		}
+	}else{
+		printf("socket: %d\n", sockfd);
 	}
 
 	return msglen;
